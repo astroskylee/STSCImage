@@ -1,6 +1,6 @@
-# SCOPE
+# AstroGOAT
 
-SCOPE stands for **Space-telescope Color Optimization and Processing Engine**.
+GOAT stands for **Greatest Observational Astroprocessing Tool**.
 
 Color-image composition tools for astronomical observations.
 
