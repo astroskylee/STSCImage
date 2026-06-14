@@ -1,15 +1,16 @@
-# AstroGOAT
+# STSCImage
 
-GOAT stands for **Greatest Observational Astroprocessing Tool**.
+STSCImage stands for **Space Telescope Science Color Image**.
 
-It's not the greatest code. Personally I use Photoshop and Pixinsight to process data. It's just a catchy name.
+STSCImage is a small astronomy image-composition tool for making display-ready
+color JPEGs from space telescope cutouts and other aligned mono images.
 
 ## Example usage
 
 `mk_colorimg` creates one color JPEG from either a 3-channel RGB array or three mono images in `(R, G, B)` order. For Euclid-style color images, pass the redder band as red, VIS as green, and the bluer NIR band as blue.
 
 ```python
-from Tian_color import mk_colorimg
+from STSCImage import mk_colorimg
 
 mk_colorimg(
     [
@@ -25,7 +26,7 @@ mk_colorimg(
 For a NumPy RGB cube:
 
 ```python
-from Tian_color import mk_colorimg
+from STSCImage import mk_colorimg
 
 mk_colorimg(rgb_array, output_jpg="target_color.jpg", input_mode="normalized")
 ```
