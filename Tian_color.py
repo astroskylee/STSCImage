@@ -99,9 +99,7 @@ from pathlib import Path
 import numpy as np
 import tifffile
 from astropy.io import fits
-from matplotlib import colors as mpl_colors
 from PIL import Image
-from skimage import color as skcolor
 
 
 @dataclass(frozen=True)
@@ -923,8 +921,14 @@ def srgb_to_linear(x: np.ndarray) -> np.ndarray:
     """
     Convert sRGB-encoded values to linear RGB.
 
-    This helper is retained for compatibility with older notebooks. The active
-    RGB/XYZ/Lab path below delegates color conversion to `skimage.color`.
+    PI mapping:
+    - RGBColorSystem in PCL uses the sRGB transfer function when the working
+      space is the default sRGB(D50) working space.
+
+    Formula:
+
+        x_linear = x / 12.92                          if x <= 0.04045
+        x_linear = ((x + 0.055) / 1.055) ^ 2.4       otherwise
     """
 
     return np.where(x <= 0.04045, x / 12.92, np.power((x + 0.055) / 1.055, 2.4))
@@ -934,8 +938,14 @@ def linear_to_srgb(x: np.ndarray) -> np.ndarray:
     """
     Convert linear RGB values back to the sRGB transfer curve.
 
-    This helper is retained for compatibility with older notebooks. The active
-    RGB/XYZ/Lab path below delegates color conversion to `skimage.color`.
+    PI mapping:
+    - Reverse of `srgb_to_linear`, again matching PCL's RGBColorSystem behavior
+      for the default sRGB working space.
+
+    Formula:
+
+        x_srgb = 12.92 * x                           if x <= 0.0031308
+        x_srgb = 1.055 * x^(1/2.4) - 0.055          otherwise
     """
 
     return np.where(x <= 0.0031308, 12.92 * x, 1.055 * np.power(x, 1.0 / 2.4) - 0.055)
@@ -1025,52 +1035,129 @@ def lab_xyz_component(x: np.ndarray) -> np.ndarray:
 
 def rgb_to_xyz(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Convert RGB values to CIE XYZ with `skimage.color`.
+    Convert RGB values to normalized CIE XYZ in the default sRGB(D50) working space.
+
+    PI mapping:
+    - Matches `RGBColorSystem::RGBToCIEXYZ()` with the default working space.
+
+    Formula:
+
+    1. Convert RGB to linear RGB with the sRGB transfer function.
+    2. Apply the RGB->XYZ matrix M built from the sRGB(D50) primaries:
+
+        X = clip((R*M00 + G*M01 + B*M02) / MX, 0, 1)
+        Y = clip( R*M10 + G*M11 + B*M12,      0, 1)
+        Z = clip((R*M20 + G*M21 + B*M22) / MZ, 0, 1)
+
+    where MX and MZ are the same normalization factors used in PCL.
     """
 
-    xyz = skcolor.rgb2xyz(np.clip(rgb, 0.0, 1.0))
-    return xyz[..., 0], xyz[..., 1], xyz[..., 2]
+    linear = srgb_to_linear(np.clip(rgb, 0.0, 1.0))
+    r = linear[..., 0]
+    g = linear[..., 1]
+    b = linear[..., 2]
+    x = np.clip((r * RGB_TO_XYZ[0, 0] + g * RGB_TO_XYZ[0, 1] + b * RGB_TO_XYZ[0, 2]) / MX, 0.0, 1.0)
+    y = np.clip(r * RGB_TO_XYZ[1, 0] + g * RGB_TO_XYZ[1, 1] + b * RGB_TO_XYZ[1, 2], 0.0, 1.0)
+    z = np.clip((r * RGB_TO_XYZ[2, 0] + g * RGB_TO_XYZ[2, 1] + b * RGB_TO_XYZ[2, 2]) / MZ, 0.0, 1.0)
+    return x, y, z
 
 
 def xyz_to_rgb(x: np.ndarray, y: np.ndarray, z: np.ndarray) -> np.ndarray:
     """
-    Convert CIE XYZ values back to RGB with `skimage.color`.
+    Convert normalized CIE XYZ values back to RGB in sRGB(D50).
+
+    PI mapping:
+    - Matches `RGBColorSystem::CIEXYZToRGB()` in PCL.
+
+    Formula:
+
+    1. Undo the PCL X/Z normalization:
+
+        X' = MX * X
+        Z' = MZ * Z
+
+    2. Apply the inverse matrix M^(-1):
+
+        R_lin = clip(X'*M'00 + Y*M'01 + Z'*M'02, 0, 1)
+        G_lin = clip(X'*M'10 + Y*M'11 + Z'*M'12, 0, 1)
+        B_lin = clip(X'*M'20 + Y*M'21 + Z'*M'22, 0, 1)
+
+    3. Reapply the sRGB transfer curve.
     """
 
-    xyz = np.stack([x, y, z], axis=-1)
-    return np.clip(skcolor.xyz2rgb(xyz), 0.0, 1.0)
+    x = x * MX
+    z = z * MZ
+    r = np.clip(x * XYZ_TO_RGB[0, 0] + y * XYZ_TO_RGB[0, 1] + z * XYZ_TO_RGB[0, 2], 0.0, 1.0)
+    g = np.clip(x * XYZ_TO_RGB[1, 0] + y * XYZ_TO_RGB[1, 1] + z * XYZ_TO_RGB[1, 2], 0.0, 1.0)
+    b = np.clip(x * XYZ_TO_RGB[2, 0] + y * XYZ_TO_RGB[2, 1] + z * XYZ_TO_RGB[2, 2], 0.0, 1.0)
+    return np.stack([linear_to_srgb(r), linear_to_srgb(g), linear_to_srgb(b)], axis=-1)
 
 
 def rgb_to_lab(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Convert RGB to normalized CIE L*, a*, b* using `skimage.color`.
+    Convert RGB to normalized CIE L*, a*, b*.
 
-    The public convention of this module is kept unchanged: L, a, and b are
-    returned in `[0, 1]`, matching the older PCL-style normalization used by
-    downstream functions.
+    PI mapping:
+    - Matches ChannelExtraction in CIELab mode and the underlying
+      `RGBColorSystem::RGBToCIELab()` path.
+    - L* is perceptual lightness; a* and b* carry chrominance.
+
+    Formula:
+
+    First compute normalized XYZ, then apply the Lab component nonlinearity:
+
+        f(t) = t^(1/3)                    if t > epsilon
+        f(t) = kappa116 * t + 16/116      otherwise
+
+    Denoting:
+
+        Xf = f(X), Yf = f(Y), Zf = f(Z)
+
+    PCL normalizes Lab into [0, 1] as:
+
+        L = clip(1.16 * Yf - 0.16, 0, 1)
+        a = clip((5 * (Xf - Yf) + ZA) / MA, 0, 1)
+        b = clip((2 * (Yf - Zf) + ZB) / MB, 0, 1)
     """
 
-    lab = skcolor.rgb2lab(np.clip(rgb, 0.0, 1.0))
-    l = np.clip(lab[..., 0] / 100.0, 0.0, 1.0)
-    a = np.clip(((lab[..., 1] / 100.0) + ZA) / MA, 0.0, 1.0)
-    b = np.clip(((lab[..., 2] / 100.0) + ZB) / MB, 0.0, 1.0)
+    x, y, z = rgb_to_xyz(rgb)
+    x = xyz_lab_component(x)
+    y = xyz_lab_component(y)
+    z = xyz_lab_component(z)
+    l = np.clip((1.16 * y) - 0.16, 0.0, 1.0)
+    a = np.clip((5.0 * (x - y) + ZA) / MA, 0.0, 1.0)
+    b = np.clip((2.0 * (y - z) + ZB) / MB, 0.0, 1.0)
     return l, a, b
 
 
 def lab_to_rgb(l: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """
-    Convert normalized CIE L*, a*, b* back to RGB using `skimage.color`.
+    Convert normalized CIE L*, a*, b* back to RGB.
+
+    PI mapping:
+    - Matches ChannelCombination in CIELab mode and the underlying
+      `RGBColorSystem::CIELabToRGB()` path.
+
+    Inverse formula:
+
+        Yf = (L + 0.16) / 1.16
+        Xf = (MA * a - ZA) / 5 + Yf
+        Zf = Yf - (MB * b - ZB) / 2
+
+    Then invert the Lab component function:
+
+        t = f^(-1)(tf)
+
+    and convert XYZ back to RGB through the inverse working-space transform.
     """
 
-    lab = np.stack(
-        [
-            np.clip(l, 0.0, 1.0) * 100.0,
-            100.0 * ((MA * np.clip(a, 0.0, 1.0)) - ZA),
-            100.0 * ((MB * np.clip(b, 0.0, 1.0)) - ZB),
-        ],
-        axis=-1,
-    )
-    return np.clip(skcolor.lab2rgb(lab), 0.0, 1.0)
+    y = (l + 0.16) / 1.16
+    x = (MA * a - ZA) / 5.0 + y
+    z = y - (MB * b - ZB) / 2.0
+    x = lab_xyz_component(x)
+    y = lab_xyz_component(y)
+    z = lab_xyz_component(z)
+    return np.clip(xyz_to_rgb(x, y, z), 0.0, 1.0)
 
 
 def replace_lab_l_with_blue(rgb: np.ndarray, blue: np.ndarray) -> np.ndarray:
@@ -1095,20 +1182,78 @@ def replace_lab_l_with_blue(rgb: np.ndarray, blue: np.ndarray) -> np.ndarray:
 
 def rgb_to_hsv(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Convert RGB to HSV with `matplotlib.colors`.
+    Convert RGB to HSV.
+
+    PI mapping:
+    - Matches the helper routines in `RGBColorSystem.h`.
+    - Used here because the final saturation boost behaves like an HSV/HSVL
+      operation rather than a straight RGB scale.
     """
 
-    hsv = mpl_colors.rgb_to_hsv(np.clip(rgb, 0.0, 1.0))
-    return hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    r = rgb[..., 0]
+    g = rgb[..., 1]
+    b = rgb[..., 2]
+    v = np.maximum(np.maximum(r, g), b)
+    mn = np.minimum(np.minimum(r, g), b)
+    delta = v - mn
+    h = np.zeros_like(v)
+    s = np.zeros_like(v)
+    nz = delta != 0
+    s[nz] = delta[nz] / v[nz]
+    red = nz & (r == v)
+    green = nz & (g == v)
+    blue = nz & (b == v)
+    h[red] = (g[red] - b[red]) / delta[red]
+    h[green] = 2.0 + (b[green] - r[green]) / delta[green]
+    h[blue] = 4.0 + (r[blue] - g[blue]) / delta[blue]
+    h /= 6.0
+    h[h < 0] += 1.0
+    return h, s, v
 
 
 def hsv_to_rgb(h: np.ndarray, s: np.ndarray, v: np.ndarray) -> np.ndarray:
     """
-    Convert HSV back to RGB with `matplotlib.colors`.
+    Convert HSV back to RGB.
+
+    PI mapping:
+    - Matches the sector-based `HSVToRGB()` implementation in `RGBColorSystem.h`.
     """
 
-    hsv = np.stack([np.mod(h, 1.0), np.clip(s, 0.0, 1.0), np.clip(v, 0.0, 1.0)], axis=-1)
-    return mpl_colors.hsv_to_rgb(hsv)
+    r = np.empty_like(v)
+    g = np.empty_like(v)
+    b = np.empty_like(v)
+    achromatic = s == 0
+    r[achromatic] = v[achromatic]
+    g[achromatic] = v[achromatic]
+    b[achromatic] = v[achromatic]
+    chromatic = ~achromatic
+    h6 = h[chromatic] * 6.0
+    i = np.floor(h6).astype(np.int32)
+    f = h6 - i
+    p = v[chromatic] * (1.0 - s[chromatic])
+    q = v[chromatic] * (1.0 - s[chromatic] * f)
+    t = v[chromatic] * (1.0 - s[chromatic] * (1.0 - f))
+    rc = np.empty_like(h6)
+    gc = np.empty_like(h6)
+    bc = np.empty_like(h6)
+    for sector in range(6):
+        mask = i == sector
+        if sector == 0:
+            rc[mask], gc[mask], bc[mask] = v[chromatic][mask], t[mask], p[mask]
+        elif sector == 1:
+            rc[mask], gc[mask], bc[mask] = q[mask], v[chromatic][mask], p[mask]
+        elif sector == 2:
+            rc[mask], gc[mask], bc[mask] = p[mask], v[chromatic][mask], t[mask]
+        elif sector == 3:
+            rc[mask], gc[mask], bc[mask] = p[mask], q[mask], v[chromatic][mask]
+        elif sector == 4:
+            rc[mask], gc[mask], bc[mask] = t[mask], p[mask], v[chromatic][mask]
+        else:
+            rc[mask], gc[mask], bc[mask] = v[chromatic][mask], p[mask], q[mask]
+    r[chromatic] = rc
+    g[chromatic] = gc
+    b[chromatic] = bc
+    return np.stack([r, g, b], axis=-1)
 
 
 def rgb_to_hsvl(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
