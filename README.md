@@ -53,10 +53,13 @@ result = Euclidimg(
     path="euclid_color",
     cred="Euclid/cred.txt",
     output_jpg="EUCLJ032251.92-394609.8.jpg",
+    ReplaceL=True,
+    RGB="auto",
 )
 
 print(result["jpg"])
 print(result["fits"])
+print(result["rgb_bands"])
 ```
 
 Arguments:
@@ -66,6 +69,8 @@ Arguments:
 - `path`: output directory for the FITS files and JPEG.
 - `cred`: Euclid credentials file passed to `astroquery.esa.euclid`.
 - `output_jpg`: optional JPEG filename written inside `path`.
+- `ReplaceL`: if `False`, skip replacing the CIELab L* channel with the stretched blue luminosity channel.
+- `RGB`: Euclid bands in `(R, G, B)` order. Use `"auto"` for the default available-band choice, or pass bands such as `("NIR_H", "NIR_Y", "VIS")` or `("H", "Y", "VIS")`.
 
 The returned dictionary contains the selected FITS paths and the final JPEG path. If the first overlapping mosaic tile for a band is empty or all zero, the downloader tries the next matching tile.
 

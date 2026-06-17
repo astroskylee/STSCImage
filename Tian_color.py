@@ -51,7 +51,7 @@ Design note:
          m  = x_bg * (1 - target_background) / (x_bg + target_background - 2*x_bg*target_background)
          I_STF = HT(I_CC; shadows=c0, highlights=1, midtones=m)
 
-  6. Replace CIELab lightness with stretched blue
+  6. Optionally replace CIELab lightness with stretched blue
 
          (L, a, b) = RGB_to_Lab(I_STF)
          I_LB = Lab_to_RGB(B_stretched, a, b)
@@ -81,7 +81,7 @@ Design note:
       -> BN
       -> CC
       -> linked STF/HT
-      -> replace L* with B
+      -> optionally replace L* with B
       -> HT darken
       -> SCNR cleanup
       -> saturation
@@ -118,6 +118,8 @@ class ComposeConfig:
       midtones slider is moved to the right, here to 0.625.
     - `scnr1_amount` and `scnr2_amount` control the two SCNR passes.
     - `saturation_amount` is the final saturation boost.
+    - `replace_luminance` controls whether the CIELab L* channel is replaced
+      with the stretched blue channel before the final darkening and cleanup.
     """
 
     shadows_clipping: float = -2.8
@@ -127,6 +129,7 @@ class ComposeConfig:
     scnr1_amount: float = 0.50
     scnr2_amount: float = 0.80
     saturation_amount: float = 0.80
+    replace_luminance: bool = True
 
 
 @dataclass(frozen=True)
@@ -1373,7 +1376,7 @@ def compose_pipeline(red: np.ndarray, green: np.ndarray, blue: np.ndarray, confi
     - BackgroundNeutralization
     - ColorCalibration
     - linked STF + HT transfer
-    - replace Lab L* with stretched blue
+    - optionally replace Lab L* with stretched blue
     - post-HT dimming (`midtones = 0.75`)
     - invert / SCNR / invert / SCNR
     - final ColorSaturation boost
@@ -1392,7 +1395,10 @@ def compose_pipeline(red: np.ndarray, green: np.ndarray, blue: np.ndarray, confi
     stfht = linked_auto_stf_and_ht(cc, config)
     blue_channel = stfht[..., 2]
     lab_l, lab_a, lab_b = rgb_to_lab(stfht)
-    lfromb = replace_lab_l_with_blue(stfht, blue_channel)
+    if config.replace_luminance:
+        lfromb = replace_lab_l_with_blue(stfht, blue_channel)
+    else:
+        lfromb = stfht
     htdim = apply_post_auto_ht_darkening(lfromb, config)
     invert1 = invert(htdim)
     scnr1 = scnr_average_neutral(invert1, config.scnr1_amount)
